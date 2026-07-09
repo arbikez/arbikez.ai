@@ -1,22 +1,15 @@
-// /api/price-analysis.js
-// Vercel serverless function: POST { make, model, year, kmDriven?, condition?, exShowroomNew? }
-// Returns a resale estimate built from ArBikez's own sold_bikes history,
-// falling back to a depreciation curve when there isn't enough comparable data yet.
-
 import { createClient } from '@supabase/supabase-js';
 
 const supabase = createClient(
   process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_ROLE_KEY // server-side only, never expose to client
+  process.env.SUPABASE_SERVICE_ROLE_KEY
 );
 
-// Rough year-based depreciation used ONLY when we have no comparable sales yet.
-// Tune these once you have real data — they're a placeholder starting point.
 const DEPRECIATION_BY_AGE_YEARS = {
   0: 0.90, 1: 0.82, 2: 0.74, 3: 0.67, 4: 0.60,
   5: 0.54, 6: 0.48, 7: 0.43, 8: 0.38, 9: 0.34,
 };
-const MAX_AGE_FACTOR = 0.28; // floor for anything older than the table above
+const MAX_AGE_FACTOR = 0.28;
 
 function depreciationFallback(exShowroomNew, ageYears) {
   const factor = DEPRECIATION_BY_AGE_YEARS[ageYears] ?? MAX_AGE_FACTOR;
@@ -33,8 +26,8 @@ export default async function handler(req, res) {
     model,
     year,
     kmDriven,
-    condition, // 'excellent' | 'good' | 'fair' | 'poor'
-    exShowroomNew, // optional, used only for fallback estimate
+    condition,
+    exShowroomNew,
     requestedBy,
   } = req.body || {};
 
@@ -43,7 +36,6 @@ export default async function handler(req, res) {
   }
 
   try {
-    // Pull comparable sold bikes: same make/model, similar year (+/- 2 years)
     const { data: comparables, error } = await supabase
       .from('sold_bikes')
       .select('sold_price, km_driven, owners, condition_grade, year_of_manufacture, days_to_sell')
@@ -57,7 +49,6 @@ export default async function handler(req, res) {
     let estimatedValue, confidence, expectedSaleDaysMin, expectedSaleDaysMax;
 
     if (comparables && comparables.length >= 3) {
-      // Enough real data — average sold price
       const prices = comparables.map((c) => c.sold_price);
       const avg = prices.reduce((a, b) => a + b, 0) / prices.length;
 
@@ -71,7 +62,6 @@ export default async function handler(req, res) {
       expectedSaleDaysMin = days.length ? days[0] : null;
       expectedSaleDaysMax = days.length ? days[days.length - 1] : null;
     } else if (exShowroomNew) {
-      // Not enough history yet — fall back to depreciation curve
       const ageYears = new Date().getFullYear() - year;
       estimatedValue = depreciationFallback(exShowroomNew, ageYears);
       confidence = 'low';
@@ -84,7 +74,46 @@ export default async function handler(req, res) {
       });
     }
 
-    // Adjust for km driven and condition if provided
     let adjusted = estimatedValue;
     if (kmDriven) {
-      if (kmDriven > 40
+      if (kmDriven > 40000) adjusted *= 0.93;
+      else if (kmDriven > 25000) adjusted *= 0.97;
+    }
+    if (condition === 'excellent') adjusted *= 1.05;
+    if (condition === 'poor') adjusted *= 0.88;
+
+    adjusted = Math.round(adjusted);
+    const recommendedListingPrice = Math.round(adjusted * 0.995);
+
+    const result = {
+      make,
+      model,
+      year,
+      estimatedValue: adjusted,
+      recommendedListingPrice,
+      expectedSaleDays: { min: expectedSaleDaysMin, max: expectedSaleDaysMax },
+      comparableCount: comparables?.length ?? 0,
+      confidence,
+    };
+
+    await supabase.from('price_estimates').insert({
+      make,
+      model,
+      year_of_manufacture: year,
+      km_driven: kmDriven ?? null,
+      condition_grade: condition ?? null,
+      estimated_value: adjusted,
+      recommended_listing_price: recommendedListingPrice,
+      expected_sale_days_min: expectedSaleDaysMin,
+      expected_sale_days_max: expectedSaleDaysMax,
+      comparable_count: comparables?.length ?? 0,
+      confidence,
+      requested_by: requestedBy ?? null,
+    });
+
+    return res.status(200).json(result);
+  } catch (err) {
+    console.error('price-analysis error:', err);
+    return res.status(500).json({ error: 'Internal error estimating price' });
+  }
+}
