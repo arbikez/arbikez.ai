@@ -2,6 +2,7 @@
   "name": "arbikez-ai-admin",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
   "description": "AR BIKEZ AI admin backend - pricing analysis, inventory, Blogger publishing",
   "dependencies": {
     "@supabase/supabase-js": "^2.45.0"
